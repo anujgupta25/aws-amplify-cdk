@@ -1,130 +1,95 @@
-/* eslint-disable max-lines */
-import * as cdk from 'aws-cdk-lib';
-import { Construct } from 'constructs';
+import * as cdk from "aws-cdk-lib";
+import { Construct } from "constructs";
 
-import * as iam from 'aws-cdk-lib/aws-iam';
-import * as amplify from '@aws-cdk/aws-amplify-alpha';
-import * as codebuild from 'aws-cdk-lib/aws-codebuild';
-import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
-import { AwsCustomResource, AwsCustomResourcePolicy, PhysicalResourceId } from 'aws-cdk-lib/custom-resources';
-import { IAwsAmplifyStackProps } from '../bin/types';
-import { NagSuppressions } from 'cdk-nag';
-
+import * as iam from "aws-cdk-lib/aws-iam";
+import { aws_amplify as amplify } from "aws-cdk-lib";
+import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
+import { AwsAmplifyStackProps } from "../bin/types";
+import { getSSMSecret } from "../util";
+import { exec } from "child_process";
 export class AwsAmplifyStack extends cdk.Stack {
-  constructor(scope: Construct, id: string, props: IAwsAmplifyStackProps) {
+  constructor(scope: Construct, id: string, props: AwsAmplifyStackProps) {
     super(scope, id, props);
 
-    const role = new iam.Role(this, 'Role', {
+    if(!process.env.GIT_TOKEN){
+      console.log("Git token is required ...")
+      process.exit(1)
+    }
+   
+    const role = new iam.Role(this, "Role", {
       roleName: props.roleName,
       description: props.roleDesc,
-      assumedBy: new iam.ServicePrincipal('amplify.amazonaws.com'),
+      assumedBy: new iam.ServicePrincipal("amplify.amazonaws.com"),
     });
-    role.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('AdministratorAccess-Amplify'));
 
-    // get github token from secret manager
-    const secret = secretsmanager.Secret.fromSecretNameV2(this, 'githubSecret', props.secretName);
-    secret.grantRead(role);
-
-    // buildspecs for next.js static website
-    const buildSpec = codebuild.BuildSpec.fromObjectToYaml(
-      {
-        version: '1.0',
-        frontend: {
-          phases: {
-            preBuild: { commands: ['npm ci'] },
-            build: { commands: ['npm run build'] },
-          },
-          artifacts: {
-            baseDirectory: '.next',
-            files: ['**/*'],
-          },
-          cache: { paths: ['node_modules/**/*'] },
-        },
-      },
+    role.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName("AdministratorAccess-Amplify")
     );
 
-    // amplify app from github repository
-    const amplifyApp = new amplify.App(this, 'test-cdk', {
-      appName: props.appName,
-      description: props.appDesc,
-      role,
-      sourceCodeProvider: new amplify.GitHubSourceCodeProvider({
-        owner: props.gitOwner,
-        repository: props.gitRepo,
-        oauthToken: secret.secretValueFromJson(props.secretName),
-      }),
-      environmentVariables : {
-        _CUSTOM_IMAGE: "public.ecr.aws/p4g0n4r9/public-test-repo:latest"
+    const secret = secretsmanager.Secret.fromSecretNameV2(
+      this,
+      "githubSecret",
+      "test_token"
+    );
+    secret.grantRead(role);
+
+    const buildYaml = `
+version: "1.0"
+frontend:
+  phases:
+    preBuild:
+      commands:
+        - echo xyz...
+        - npm install
+    build:
+      commands:
+        - npm run build
+  artifacts:
+    baseDirectory: build
+    files:
+      - "**/*"
+  cache:
+    paths:
+      - node_modules/**/*
+`;
+    const amplifyApp = new amplify.CfnApp(this, "Amplify CDKK", {
+      name: "Amplify CDKK",
+      buildSpec: buildYaml.trim(),
+      environmentVariables: [
+        {
+          name: "someKey",
+          value: "someValue-",
+        },
+      ],
+      basicAuthConfig: {
+        enableBasicAuth: true,
+        password: "test0123",
+        username: "test",
       },
-      autoBranchCreation: {
-        autoBuild: true,
-        patterns: [props.gitBranch],
+      iamServiceRole: "ced-app-backend",
+      autoBranchCreationConfig: {
+        framework: "react",
+        autoBranchCreationPatterns: ["feature-local-verify"],
+        enableAutoBranchCreation: true,
+        enableAutoBuild: true,
+        enablePerformanceMode: false,
+        enablePullRequestPreview: false,
       },
-      autoBranchDeletion: true,
-      buildSpec,
+      customRules: [
+        {
+          source: "**/SOURCE/**",
+          target: "**/TARGET/**",
+          status: "TRUE",
+        },
+      ],
+      repository: "https://github.com/anujgupta2559/react-boilerplate.git",
+      accessToken: process.env.GIT_TOKEN,
     });
 
-    amplifyApp.addCustomRule({
-      source: '/docs/specific-filename.html',
-      target: '/documents/different-filename.html',
-      status: amplify.RedirectStatus.TEMPORARY_REDIRECT,
-    })
-
-   // add main branch
-    const main = amplifyApp.addBranch('Main', {
-      autoBuild: true,
-      branchName: props.gitBranch,
-      stage: 'PRODUCTION',
+    new amplify.CfnBranch(this, "main", {
+      appId: amplifyApp.attrAppId,
+      branchName: "main",
+      enablePullRequestPreview: true,
     });
-
-    amplifyApp.addBranch('feature-local-verify', {
-      autoBuild : true,
-      branchName : "feature-local-verify",
-      pullRequestPreview: false
-    })
-
-    // const domain = amplifyApp.addDomain(props.appName);
-    // domain.mapRoot(main);
-    // domain.mapSubDomain(main, 'www');
-
-    // const setPlatform = new AwsCustomResource(this, 'AmplifySetPlatform', {
-    //   onUpdate: {
-    //     service: 'Amplify',
-    //     action: 'updateApp',
-    //     parameters: {
-    //       appId: amplifyApp.appId,
-    //       platform: 'WEB_COMPUTE',
-    //     },
-    //     physicalResourceId: PhysicalResourceId.of('AmplifyCustomResourceSetPlatform'),
-    //   },
-    //   policy: AwsCustomResourcePolicy.fromSdkCalls({
-    //     resources: [amplifyApp.arn],
-    //   }),
-    // });
-    // setPlatform.node.addDependency(domain);
-
-    // const setFramework = new AwsCustomResource(this, 'AmplifySetFramework', {
-    //   onUpdate: {
-    //     service: 'Amplify',
-    //     action: 'updateBranch',
-    //     parameters: {
-    //       appId: amplifyApp.appId,
-    //       branchName: 'main',
-    //       framework: 'Next.js - SSR',
-    //     },
-    //     physicalResourceId: PhysicalNext.js - SSRResourceId.of('AmplifyCustomResourceSetPlatform'),
-    //   },
-    //   policy: AwsCustomResourcePolicy.fromSdkCalls({
-    //     resources: AwsCustomResourcePolicy.ANY_RESOURCE, // This allows actions on any resource
-    //   }),
-    // });
-    // setFramework.node.addDependency(domain);
-
-    // NagSuppressions.addStackSuppressions(this, [
-    //   { id: 'AwsSolutions-IAM4', reason: 'Using Amplify AWS Managed Policy.' },
-    //   { id: 'AwsSolutions-IAM5', reason: 'Wildcard in AWS Managed Policy.' },
-    //   { id: 'CdkNagValidationFailure', reason: 'Custom resource uses other node version.' },
-    //   { id: 'AwsSolutions-L1', reason: 'Custom resource uses other node version.' },
-    // ]);
   }
 }

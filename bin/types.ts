@@ -1,6 +1,6 @@
 import { StackProps } from 'aws-cdk-lib';
 
-export interface IAwsAmplifyStackProps extends StackProps {
+export interface AwsAmplifyStackProps extends StackProps {
   roleName: string,
   roleDesc: string,
   secretName: string,
